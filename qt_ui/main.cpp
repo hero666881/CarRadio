@@ -60,10 +60,39 @@ static void build_list() {
     free(ix);
 }
 static int getDur(const char *path) {
-    struct stat st; if(stat(path,&st)!=0) return 240;
-    int dur=(int)(st.st_size*8LL/192000);
-    return (dur>330)?330:(dur<60?240:dur);
+    char cmd[512];
+    char buf[128];
+    FILE *fp;
+    int duration = 180;
+    
+    // 用 mplayer 获取时长
+    snprintf(cmd, sizeof(cmd), 
+             "mplayer -vo null -ao null -identify -frames 0 \"%s\" 2>/dev/null | grep ID_LENGTH | cut -d= -f2",
+             path);
+    
+    fp = popen(cmd, "r");
+    if (fp) {
+        if (fgets(buf, sizeof(buf), fp)) {
+            double dur = strtod(buf, NULL);
+            if (dur > 0) {
+                duration = (int)(dur + 0.5);
+             //   printf("[Mplayer] 时长: %d 秒\n", duration);
+            }
+        }
+        pclose(fp);
+    }
+    
+    if (duration == 180) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            duration = (int)(st.st_size * 8LL / 192000);
+        }
+    }
+    
+    if (duration < 5) duration = 5;
+    return duration;
 }
+
 static QString fm(int s){return QString("%1:%2").arg(s/60,2,10,QLatin1Char('0')).arg(s%60,2,10,QLatin1Char('0'));}
 
 class CarRadio : public QWidget {
@@ -127,92 +156,187 @@ public:
 
         QWidget *rp=new QWidget(); rp->setObjectName("albumPanel"); rp->setFixedWidth(260);
         QVBoxLayout *rl=new QVBoxLayout(rp); rl->setContentsMargins(20,30,20,30);
-        albumLabel=new QLabel("♫"); albumLabel->setObjectName("albumArt"); albumLabel->setAlignment(Qt::AlignCenter);
+       	albumLabel = new QLabel("↓"); albumLabel->setObjectName("albumArt"); albumLabel->setAlignment(Qt::AlignCenter);
         rl->addWidget(albumLabel); rl->addStretch();
-QLabel *lb132=new QLabel("当前播放"); lb132->setObjectName("nowTitle"); rl->addWidget(lb132);
+        QLabel *lb132=new QLabel("当前播放"); lb132->setObjectName("nowTitle"); rl->addWidget(lb132);
         titleLabel=new QLabel("请选择歌曲..."); titleLabel->setObjectName("songTitle"); titleLabel->setWordWrap(true);
         rl->addWidget(titleLabel);
         bl->addWidget(rp);
         outer->addWidget(body);
 
-        // Bottom
-        QWidget *bot=new QWidget(); bot->setObjectName("bottomBar"); bot->setFixedHeight(100);
-QVBoxLayout *botV=new QVBoxLayout(bot); botV->setContentsMargins(20,4,20,4);
-QHBoxLayout *cRow=new QHBoxLayout();
-bottomTitle=new QLabel("请选择歌曲..."); bottomTitle->setObjectName("bottomTitle"); cRow->addWidget(bottomTitle);
-cRow->addStretch();
-QPushButton*ctrls[]={
-    new QPushButton("⏮"),new QPushButton("⏯"),new QPushButton("⏭"),
-    new QPushButton("🔊-"),new QPushButton("🔊+"),new QPushButton("🔇")
-};
-ctrls[0]->setObjectName("ctrlBtn");ctrls[0]->setFixedSize(64,48);
-ctrls[1]->setObjectName("ctrlBtn");ctrls[1]->setFixedSize(72,48);
-ctrls[2]->setObjectName("ctrlBtn");ctrls[2]->setFixedSize(64,48);
-for(int i=3;i<6;i++){ctrls[i]->setObjectName("ctrlBtn");ctrls[i]->setFixedSize(40,40);}
-cRow->addWidget(ctrls[0]);cRow->addWidget(ctrls[1]);cRow->addWidget(ctrls[2]);
-cRow->addSpacing(20);cRow->addWidget(ctrls[3]);cRow->addWidget(ctrls[4]);cRow->addWidget(ctrls[5]);
-botV->addLayout(cRow);
-connect(ctrls[0],&QPushButton::clicked,[this]{if(currentSongIdx>0)playSong(currentSongIdx-1);});
-connect(ctrls[1],&QPushButton::clicked,[this]{pipe_write(mplayer_fd,"pause");isPlaying=!isPlaying;if(isPlaying)fakeTimer->start(100);else fakeTimer->stop();});
-connect(ctrls[2],&QPushButton::clicked,[]{pipe_write(ui_fd,"next");});
-connect(ctrls[3],&QPushButton::clicked,[]{pipe_write(mplayer_fd,"volume -10 0");});
-connect(ctrls[4],&QPushButton::clicked,[]{pipe_write(mplayer_fd,"volume 10 0");});
-connect(ctrls[5],&QPushButton::clicked,[]{pipe_write(mplayer_fd,"mute");});
-QWidget *pw=new QWidget();pw->setMaximumWidth(440);
-QVBoxLayout *pl=new QVBoxLayout(pw);pl->setContentsMargins(0,0,0,0);
-QHBoxLayout *tml=new QHBoxLayout();
-timeLabel=new QLabel("00:00");timeLabel->setObjectName("timeLbl");
-timeTotal=new QLabel("00:00");timeTotal->setObjectName("timeLbl");
-tml->addWidget(timeLabel);tml->addStretch();tml->addWidget(timeTotal);
-pl->addLayout(tml);
-progressBar=new QSlider(Qt::Horizontal);progressBar->setObjectName("progBar");progressBar->setRange(0,1000);
-connect(progressBar,&QSlider::sliderReleased,this,&CarRadio::onProgressSeek);
-pl->addWidget(progressBar);
-QHBoxLayout *prow=new QHBoxLayout();prow->addStretch();prow->addWidget(pw);prow->addStretch();
-botV->addLayout(prow);
-outer->addWidget(bot);
+		// Bottom
+		QWidget *bot = new QWidget(); 
+		bot->setObjectName("bottomBar"); 
+		bot->setFixedHeight(120);
+
+		QVBoxLayout *botV = new QVBoxLayout(bot);
+		botV->setContentsMargins(20, 4, 20, 4);
+		botV->setSpacing(4);
+
+		// 第一行：歌曲标题
+		QHBoxLayout *titleRow = new QHBoxLayout();
+		bottomTitle = new QLabel("请选择歌曲...");
+		bottomTitle->setObjectName("bottomTitle");
+		titleRow->addWidget(bottomTitle);
+		titleRow->addStretch();
+		botV->addLayout(titleRow);
+
+		// 第二行：进度条 + 时间
+		QWidget *pw = new QWidget();
+		pw->setMaximumWidth(500);
+		QVBoxLayout *pl = new QVBoxLayout(pw);
+		pl->setContentsMargins(0, 0, 0, 0);
+
+		QHBoxLayout *tml = new QHBoxLayout();
+		timeLabel = new QLabel("00:00");
+		timeLabel->setObjectName("timeLbl");
+		timeTotal = new QLabel("00:00");
+		timeTotal->setObjectName("timeLbl");
+		tml->addWidget(timeLabel);
+		tml->addStretch();
+		tml->addWidget(timeTotal);
+		pl->addLayout(tml);
+
+		progressBar = new QSlider(Qt::Horizontal);
+		progressBar->setObjectName("progBar");
+		progressBar->setRange(0, 1000);
+		connect(progressBar, &QSlider::sliderReleased, this, &CarRadio::onProgressSeek);
+		pl->addWidget(progressBar);
+
+		QHBoxLayout *prow = new QHBoxLayout();
+		prow->addStretch();
+		prow->addWidget(pw);
+		prow->addStretch();
+		botV->addLayout(prow);
+
+		// 第三行：控制按钮（上一首、播放/暂停、下一首、音量）
+		QHBoxLayout *ctrlRow = new QHBoxLayout();
+		ctrlRow->setSpacing(15);
+
+		// 创建控制按钮
+		QPushButton *prevBtn = new QPushButton("⏮");
+		QPushButton *playBtn = new QPushButton("⏯");
+		QPushButton *nextBtn = new QPushButton("⏭");
+		QPushButton *volDownBtn = new QPushButton("🔊-");
+		QPushButton *volUpBtn = new QPushButton("🔊+");
+		QPushButton *muteBtn = new QPushButton("🔇");
+
+		// 设置样式
+		prevBtn->setObjectName("ctrlBtn");
+		playBtn->setObjectName("ctrlBtn");
+		nextBtn->setObjectName("ctrlBtn");
+		volDownBtn->setObjectName("ctrlBtn");
+		volUpBtn->setObjectName("ctrlBtn");
+		muteBtn->setObjectName("ctrlBtn");
+
+		// 设置大小
+		prevBtn->setFixedSize(60, 42);
+		playBtn->setFixedSize(70, 42);
+		nextBtn->setFixedSize(60, 42);
+		volDownBtn->setFixedSize(48, 38);
+		volUpBtn->setFixedSize(48, 38);
+		muteBtn->setFixedSize(48, 38);
+
+		// 居中布局 - 先加弹性空间，然后按钮，再加弹性空间
+		ctrlRow->addStretch();
+		ctrlRow->addWidget(prevBtn);
+		ctrlRow->addWidget(playBtn);
+		ctrlRow->addWidget(nextBtn);
+		ctrlRow->addSpacing(30);  // 播放控制和音量控制之间的间距
+		ctrlRow->addWidget(volDownBtn);
+		ctrlRow->addWidget(volUpBtn);
+		ctrlRow->addWidget(muteBtn);
+		ctrlRow->addStretch();
+
+		botV->addLayout(ctrlRow);
+
+		outer->addWidget(bot);
+
+// 连接信号
+connect(prevBtn, &QPushButton::clicked, [this]{ 
+    if(currentSongIdx > 0) {
+        playSong(currentSongIdx - 1);
+    } else {
+        playSong(song_count - 1);  // 如果是第一首，跳到最后一首
+    }
+   // pipe_write(ui_fd, "next");
+});
+
+connect(playBtn, &QPushButton::clicked, [this, playBtn]{ 
+    pipe_write(mplayer_fd, "pause");
+    isPlaying = !isPlaying;
+    if(isPlaying) {
+        fakeTimer->start(1000);
+        playBtn->setText("⏸");
+    } else {
+        fakeTimer->stop();
+        playBtn->setText("⏯");
+    }
+});
+
+connect(nextBtn, &QPushButton::clicked, [this]{ 
+    if(currentSongIdx < song_count - 1) {
+        playSong(currentSongIdx + 1);
+    } else {
+        playSong(0);  // 如果是最后一首，跳到第一首
+    }
+  // pipe_write(ui_fd, "next");
+});
+
+connect(volDownBtn, &QPushButton::clicked, []{ 
+    pipe_write(mplayer_fd, "volume -10 0"); 
+});
+
+connect(volUpBtn, &QPushButton::clicked, []{ 
+    pipe_write(mplayer_fd, "volume 10 0"); 
+});
+
+connect(muteBtn, &QPushButton::clicked, []{ 
+    pipe_write(mplayer_fd, "mute"); 
+});
+   
 
         setStyleSheet(
-            "#mainWin{background-color:#0a0a0f;color:#ccc;}"
+            "#mainWin{background-color:#0a0a0f;color:#ccc;font-size:14px;}"
             "#topBar{background:#111118;border-bottom:1px solid #1e1e2a;}"
-            "#topTitle{color:#ff9900;font-size:16px;font-weight:bold;}"
-            "#topTime{color:#888;font-size:13px;}"
+            "#topTitle{color:#ff9900;font-size:20px;font-weight:bold;}"
+            "#topTime{color:#888;font-size:16px;}"
             "#nav{background:#0e0e16;}"
-            "#navBtn{background:transparent;color:#888;border:none;text-align:left;padding-left:20px;font-size:15px;border-radius:6px;}"
+            "#navBtn{background:transparent;color:#888;border:none;text-align:left;padding-left:20px;font-size:18px;border-radius:6px;}"
             "#navBtn:hover{background:#1a1a2a;color:#ccc;}"
-            "#navBtnActive{background:#1a1a30;color:#ff9900;border:none;text-align:left;padding-left:20px;font-size:15px;border-radius:6px;border-left:3px solid #ff9900;}"
+            "#navBtnActive{background:#1a1a30;color:#ff9900;border:none;text-align:left;padding-left:20px;font-size:18px;border-radius:6px;border-left:3px solid #ff9900;}"
             "#sep{background:#1a1a28;}"
-            "#catBtn{background:#151520;color:#aaa;border:1px solid #222;padding:8px 16px;font-size:13px;border-radius:18px;}"
+            "#catBtn{background:#151520;color:#aaa;border:1px solid #222;padding:10px 20px;font-size:16px;border-radius:18px;}"
             "#catBtn:hover{background:#ff9900;color:#000;}"
-            "#songList{background:transparent;color:#ccc;border:none;font-size:13px;}"
-            "#songList::item{padding:7px 12px;border-bottom:1px solid #151520;}"
+            "#songList{background:transparent;color:#ccc;border:none;font-size:16px;}"
+            "#songList::item{padding:10px 15px;border-bottom:1px solid #151520;}"
             "#songList::item:hover{background:#1a1a28;}"
             "#songList::item:selected{background:#1a1a30;color:#ff9900;}"
             "#albumPanel{background:#0e0e16;}"
-            "#albumArt{color:#ff9900;font-size:80px;}"
-            "#nowTitle{color:#666;font-size:11px;}"
-            "#songTitle{color:#ccc;font-size:15px;}"
+            "#albumArt{color:#ff9900;font-size:100px;}"
+            "#nowTitle{color:#666;font-size:14px;}"
+            "#songTitle{color:#ccc;font-size:18px;}"
             "#bottomBar{background:#111118;border-top:1px solid #1e1e2a;}"
-            "#timeLbl{color:#888;font-size:11px;}"
-            "#progBar::groove:horizontal{height:4px;background:#222;border-radius:2px;}"
-            "#progBar::handle:horizontal{width:12px;height:12px;margin:-4px 0;background:#ff9900;border-radius:6px;}"
-            "#progBar::sub-page:horizontal{background:#ff9900;border-radius:2px;}"
-            "#ctrlBtn{background:transparent;color:#888;border:none;font-size:20px;}"
+            "#timeLbl{color:#888;font-size:14px;}"
+            "#progBar::groove:horizontal{height:6px;background:#222;border-radius:3px;}"
+            "#progBar::handle:horizontal{width:16px;height:16px;margin:-5px 0;background:#ff9900;border-radius:8px;}"
+            "#progBar::sub-page:horizontal{background:#ff9900;border-radius:3px;}"
+            "#ctrlBtn{background:transparent;color:#888;border:none;font-size:24px;}"
             "#ctrlBtn:hover{color:#ff9900;}"
-            "#statusLbl{color:#555;font-size:11px;}"
-            "#placeholderLbl{color:#555;font-size:28px;}"
+            "#statusLbl{color:#555;font-size:14px;}"
+            "#placeholderLbl{color:#555;font-size:32px;}"
         );
 
         connectPipes();loadCategory("ch1");
         fakeTimer=new QTimer(this); connect(fakeTimer,&QTimer::timeout,this,&CarRadio::tickProgress);
     }
 
-    QWidget*buildMusicPage(){
+    QWidget* buildMusicPage(){
         QWidget *w=new QWidget(); QVBoxLayout *vl=new QVBoxLayout(w);
         vl->setContentsMargins(20,15,20,15); vl->setSpacing(10);
         QHBoxLayout *cr=new QHBoxLayout();
         QLabel *m=new QLabel("音乐分类");m->setObjectName("nowTitle");cr->addWidget(m);
-        struct{const char*c,*l;}cs[]={{"ch1","曲库一"},{"ch2","曲库二"},{"ch3","曲库三"}};
+        struct{const char*c,*l;}cs[]={{"ch1","流行音乐"},{"ch2","欧美音乐"},{"ch3","摇滚音乐"}};
         for(auto &c:cs){QPushButton *b=new QPushButton(c.l);b->setObjectName("catBtn");QString cat(c.c);connect(b,&QPushButton::clicked,[this,cat]{loadCategory(cat);});cr->addWidget(b);}
         cr->addStretch(); vl->addLayout(cr);
         songList=new QListWidget(); songList->setObjectName("songList");
@@ -220,12 +344,12 @@ outer->addWidget(bot);
         vl->addWidget(songList);
         return w;
     }
-    QWidget*buildPlace(const QString &n){
+    QWidget* buildPlace(const QString &n){
         QWidget *w=new QWidget(); QVBoxLayout *vl=new QVBoxLayout(w);
         QLabel *l=new QLabel(n+" — 功能开发中"); l->setObjectName("placeholderLbl"); l->setAlignment(Qt::AlignCenter);
         vl->addWidget(l); return w;
     }
-    QWidget*buildNaviPage(){
+    QWidget* buildNaviPage(){
         QWidget *w=new QWidget(); QVBoxLayout *vl=new QVBoxLayout(w);
         vl->setContentsMargins(20,15,20,15);
         QLabel *n=new QLabel("Linux 导航系统");n->setObjectName("nowTitle");vl->addWidget(n);
@@ -248,36 +372,136 @@ outer->addWidget(bot);
         songList->clear();
         for(int i=0;i<song_count;i++){if(cat!=QString(song_cat[i]))continue;QFileInfo fi(song_paths[i]);QListWidgetItem *it=new QListWidgetItem(QString("#%1  %2").arg(i+1).arg(fi.fileName()));it->setData(Qt::UserRole,i);songList->addItem(it);}
     }
-    void playSong(int idx){
-        currentSongIdx=idx; QFileInfo fi(song_paths[idx]); titleLabel->setText(fi.fileName());if(bottomTitle)bottomTitle->setText(fi.fileName());
-        char cmd[32];snprintf(cmd,sizeof(cmd),"play:%d",idx+1);pipe_write(ui_fd,cmd);
-        isPlaying=true;int dur=getDur(song_paths[idx]);fakeTimer->start(100);progressBar->setRange(0,dur*10);progressBar->setValue(0);
-        timeLabel->setText("00:00");timeTotal->setText(fm(getDur(song_paths[idx])));
-        albumLabel->setText("♫");
+    
+    // 新增高亮方法
+    void highlightCurrentSong() {
+        if (currentSongIdx < 0 || currentSongIdx >= song_count) return;
+        songList->clearSelection();
+        for (int i = 0; i < songList->count(); i++) {
+            QListWidgetItem *item = songList->item(i);
+            if (item->data(Qt::UserRole).toInt() == currentSongIdx) {
+                songList->setCurrentItem(item);
+                songList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+                break;
+            }
+        }
     }
-    void tickProgress(){
-        if(!isPlaying)return;
-        int v=progressBar->value()+1;if(v>1000){v=0;fakeTimer->stop();isPlaying=false;}
-        progressBar->setValue(v);
-        int sec=v*getDur(song_paths[currentSongIdx])/1000;timeLabel->setText(fm(sec));
-    }
-    void onProgressSeek(){
-        if(currentSongIdx<0)return;
-        int v=progressBar->value();
-        int sec=v/10;char cmd[64];snprintf(cmd,sizeof(cmd),"seek %d 2",sec);
-        pipe_write(mplayer_fd,cmd);timeLabel->setText(fm(sec));
-    }
+    void playSong(int idx) {
+    if (idx < 0 || idx >= song_count) return;
+    
+    currentSongIdx = idx;
+	albumLabel->setText("♫"); 
+    QFileInfo fi(song_paths[idx]);
+    titleLabel->setText(fi.fileName());
+    if(bottomTitle) bottomTitle->setText(fi.fileName());
+    
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "play:%d", idx + 1);
+    pipe_write(ui_fd, cmd);
+    
+    isPlaying = true;
+    int dur = getDur(song_paths[idx]);
+    
+    // ⭐ 改这里：进度条范围 0 到 总时长（秒）
+    progressBar->setRange(0, dur);
+    progressBar->setValue(0);
+    timeLabel->setText("00:00");
+    timeTotal->setText(fm(dur));
+    albumLabel->setText("♫");
+    
+    fakeTimer->start(1000);
+    highlightCurrentSong();
+	}
 
+	void tickProgress() {
+	 albumLabel->setText("♫");   
+	 if(!isPlaying || currentSongIdx < 0 || currentSongIdx >= song_count) return;
+    int current_val = progressBar->value();
+    int max_val = progressBar->maximum();  // 总时长（秒）
+    
+    if (current_val >= max_val) {
+        fakeTimer->stop();
+        isPlaying = false;
+        return;
+    }
+    
+    // 每次增加 1 秒
+    int new_val = current_val + 1;
+    progressBar->setValue(new_val > max_val ? max_val : new_val);
+    
+    // 显示分秒格式
+    timeLabel->setText(fm(new_val));
+	}
+	void onProgressSeek() {
+    if(currentSongIdx < 0 || currentSongIdx >= song_count) return;
+    
+    // ⭐ 进度条的值就是秒数
+    int target_sec = progressBar->value();
+    
+ //   printf("[Qt-UI] 拖动进度条到 %d 秒\n", target_sec);
+   // fflush(stdout);
+    
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "seek %d 2", target_sec);
+    pipe_write(mplayer_fd, cmd);
+    
+    timeLabel->setText(fm(target_sec));
+}
 private slots:
     void onStatus(){
         char buf[256];int n=read(status_fd,buf,sizeof(buf)-1);
-        if(n<=0) return;\
+        if(n<=0) return;
         buf[n]=0;
         for(int i=0;i<n;i++)if(buf[i]=='\n'){buf[i]=0;break;}
-        if(strncmp(buf,"PLAYING:",8)==0){int num=atoi(buf+8);if(num>0&&num<=song_count){QFileInfo fi(song_paths[num-1]);titleLabel->setText(fi.fileName());if(bottomTitle)bottomTitle->setText(fi.fileName());currentSongIdx=num-1;isPlaying=true;fakeTimer->start(200);progressBar->setValue(0);timeLabel->setText("00:00");timeTotal->setText(fm(getDur(song_paths[num-1])));albumLabel->setText("♫");}}
-        else if(strncmp(buf,"DOWNLOADING:",12)==0)albumLabel->setText("↓");
-        else if(strcmp(buf,"IDLE")==0){isPlaying=false;fakeTimer->stop();}
-        else if(strcmp(buf,"QUIT")==0){isPlaying=false;fakeTimer->stop();}
+        if(strncmp(buf,"PLAYING:",8)==0){
+            int num=atoi(buf+8);
+            if(num>0&&num<=song_count){
+                QFileInfo fi(song_paths[num-1]);
+                titleLabel->setText(fi.fileName());
+                if(bottomTitle)bottomTitle->setText(fi.fileName());
+                currentSongIdx=num-1;
+                isPlaying=true;
+				int dur = getDur(song_paths[num - 1]);
+				progressBar->setRange(0, dur);
+				progressBar->setValue(0);
+				timeLabel->setText("00:00");
+				timeTotal->setText(fm(dur));
+				albumLabel->setText("♫");
+
+				fakeTimer->start(1000);
+				highlightCurrentSong();
+
+			}
+		}
+        else if(strncmp(buf,"DOWNLOADING:",12)==0) {
+		if (albumLabel->text() != "♫") {
+       		 albumLabel->setText("↓");
+    		}
+		}
+        else if(strcmp(buf,"IDLE")==0){
+            isPlaying=false;
+            fakeTimer->stop();
+            // 自动切换到下一首
+            if (currentSongIdx >= 0 && currentSongIdx < song_count - 1) {
+                playSong(currentSongIdx + 1);
+                pipe_write(ui_fd, "next");
+            } else if (currentSongIdx == song_count - 1) {
+                playSong(0);
+                pipe_write(ui_fd, "next");
+            }
+        }
+        else if(strcmp(buf,"NEXT_SONG")==0){
+            // 由client触发的切歌信号
+            if (currentSongIdx >= 0 && currentSongIdx < song_count - 1) {
+                playSong(currentSongIdx + 1);
+            } else if (currentSongIdx == song_count - 1) {
+                playSong(0);
+            }
+        }
+        else if(strcmp(buf,"QUIT")==0){
+            isPlaying=false;
+            fakeTimer->stop();
+        }
     }
 };
 

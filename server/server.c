@@ -9,11 +9,24 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/sendfile.h>
+#include <signal.h>
 #include "proto.h"
 
 // ========== 动态歌曲路由表 ==========
 char  **song_table = NULL;
 int     song_count = 0;
+
+// 信号处理：忽略 SIGPIPE，防止客户端断开导致服务端退出
+static void on_signal(int sig) {
+    if (sig == SIGPIPE) {
+        // 忽略 SIGPIPE
+        return;
+    }
+    if (sig == SIGINT || sig == SIGTERM) {
+        printf("\n[系统提示] 收到退出信号，服务端关闭...\n");
+        exit(0);
+    }
+}
 
 // ----- 扫描子目录，统计 .mp3 文件数 -----
 static int count_mp3(const char *subdir) {
@@ -40,7 +53,6 @@ static void fill_mp3(const char *subdir, char **table, int offset) {
         char *name = ent->d_name;
         size_t len = strlen(name);
         if (len > 4 && strcasecmp(name + len - 4, ".mp3") == 0) {
-            // 分配 "media/ch1/xxx.mp3" 格式的路径
             size_t path_len = strlen(subdir) + 1 + len + 1;
             table[offset] = malloc(path_len);
             snprintf(table[offset], path_len, "%s/%s", subdir, name);
@@ -60,7 +72,6 @@ static void build_song_table() {
     const char *subdirs[] = { "media/ch1", "media/ch2", "media/ch3" };
     int n = sizeof(subdirs) / sizeof(subdirs[0]);
 
-    // 第一遍：数总数
     song_count = 0;
     for (int i = 0; i < n; i++)
         song_count += count_mp3(subdirs[i]);
@@ -70,18 +81,15 @@ static void build_song_table() {
         return;
     }
 
-    // 分配指针数组
     song_table = calloc(song_count, sizeof(char *));
     if (!song_table) { perror("calloc"); exit(1); }
 
-    // 第二遍：填充
     int offset = 0;
     for (int i = 0; i < n; i++) {
         fill_mp3(subdirs[i], song_table, offset);
-        offset += count_mp3(subdirs[i]);  // 再次计数来推进（简单可靠）
+        offset += count_mp3(subdirs[i]);
     }
 
-    // 按文件名字母序排列，保证编号稳定
     qsort(song_table, song_count, sizeof(char *), cmp);
 
     printf("[媒体扫描] 共发现 %d 首歌曲:\n", song_count);
@@ -99,6 +107,12 @@ static void free_song_table() {
 // ========== 主程序 ==========
 int main() {
     setlinebuf(stdout);
+    
+    // 设置信号处理
+    signal(SIGPIPE, on_signal);
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    
     printf("======================================\n");
     printf("[云端曲库] TCP 流媒体点播服务器 启动！\n");
     printf("[云端曲库] 正在扫描 media/ 目录...\n");
@@ -113,6 +127,11 @@ int main() {
     printf("\n[云端曲库] 正在端口 %d 等待车机连接...\n", SERVER_PORT);
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket 创建失败");
+        return 1;
+    }
+    
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -122,18 +141,48 @@ int main() {
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     serv_addr.sin_port = htons(SERVER_PORT);
 
-    bind(server_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-    listen(server_fd, 10);
+    if (bind(server_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("bind 失败");
+        close(server_fd);
+        return 1;
+    }
+    
+    if (listen(server_fd, 10) < 0) {
+        perror("listen 失败");
+        close(server_fd);
+        return 1;
+    }
 
+    // ⭐ 主循环 - 无限循环，永远不会退出
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        
+        if (client_fd < 0) {
+            perror("accept 失败");
+            continue;  // 继续等待下一个连接
+        }
 
         printf("\n[系统提示] 车载客户端 (%s) 已接入！\n", inet_ntoa(client_addr.sin_addr));
 
         char request[128] = {0};
-        recv(client_fd, request, sizeof(request), 0);
+        int recv_len = recv(client_fd, request, sizeof(request) - 1, 0);
+        if (recv_len <= 0) {
+            printf("[错误] 接收请求失败或客户端断开\n");
+            close(client_fd);
+            continue;
+        }
+        request[recv_len] = 0;
+        
+        // 去除换行符
+        for (int i = 0; i < recv_len; i++) {
+            if (request[i] == '\n' || request[i] == '\r') {
+                request[i] = 0;
+                break;
+            }
+        }
+        
         printf("[系统提示] 客户点播了歌曲: 编号 %s\n", request);
 
         int song_idx = atoi(request) - 1;
@@ -169,8 +218,10 @@ int main() {
 
         close(file_fd);
         close(client_fd);
+        // ⭐ 继续循环，等待下一个客户端连接
     }
 
+    // 正常情况不会执行到这里
     free_song_table();
     close(server_fd);
     return 0;
