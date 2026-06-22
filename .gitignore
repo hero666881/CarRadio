@@ -1,0 +1,18 @@
+# 忽略编译生成的可执行文件
+client_app
+server_app
+qt_ui/ui_qt
+navi/gps_server
+navi/server
+
+# 忽略目标文件和中间文件
+*.o
+*.moc
+moc_predefs.h
+
+# 忽略 Qt 和 VS Code 的缓存文件
+.qmake.stash
+.vscode/
+
+# 忽略日志文件
+*.log
